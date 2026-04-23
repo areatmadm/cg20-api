@@ -431,6 +431,11 @@ async def get_game_reviews(game_id: int):
 
 @app.get("/streamer-rank/chzzk")
 async def get_chzzk_streamer_rank():
+    if LATEST_STEAM_RANKS["last_updated"] is None:
+        return {
+            "status": "pending",
+            "msg": "랭크 수집 중이에요! 네르지 마시고, 조금만 더 기다려 주세요! 🏃‍♂️💨"
+        }
     # 💡 이미 stream_tasks에서 가공된 랭킹 데이터를 그대로 반환
     return {
         "status": "success",
@@ -440,6 +445,11 @@ async def get_chzzk_streamer_rank():
 
 @app.get("/streamer-rank/twitch")
 async def get_twitch_streamer_rank():
+    if LATEST_STEAM_RANKS["last_updated"] is None:
+        return {
+            "status": "pending",
+            "msg": "랭크 수집 중이에요! 네르지 마시고, 조금만 더 기다려 주세요! 🏃‍♂️💨"
+        }
     return {
         "status": "success",
         "last_updated": PLATFORM_RANKINGS["last_updated"],
