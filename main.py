@@ -263,7 +263,8 @@ async def get_steam_ranks(country: str, start: int, end: int, db: AsyncSession =
             "rank": start + i,
             "appid": appid,
             "name": info["name"],  # 1. 게임 이름
-            "headerImage": info["headerImage"]  # 2. 헤더 이미지 주소
+            "headerImage": info["headerImage"],  # 2. 헤더 이미지 주소
+            "price": info["price"] # 3. 원화 가격
         })
 
     return {
