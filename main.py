@@ -46,7 +46,7 @@ from services.stream_tasks import update_chzzk_rank, update_twitch_rank
 #
 # # Steam API Fetch 대기열
 # PENDING_QUEUE = {}
-from store import LATEST_RATES, LATEST_STEAM_RANKS, PENDING_QUEUE, PLATFORM_RANKINGS
+from store import LATEST_RATES, LATEST_STEAM_RANKS, PENDING_QUEUE, PLATFORM_RANKINGS, LIVE_STREAMS
 
 scheduler = AsyncIOScheduler()
 
@@ -455,16 +455,16 @@ async def get_game_reviews(game_id: int):
 @app.get("/streamer-rank/chzzk")
 async def get_chzzk_streamer_rank(db: AsyncSession = Depends(get_rdb)):
     # 1. 데이터 수집 여부 확인
-    if LATEST_STEAM_RANKS["last_updated"] is None:
+    if LIVE_STREAMS["last_updated"] is None:
         return {
             "status": "pending",
             "msg": "치지직 데이터를 열심히 긁어오고 있어요! 잠시만 기다려 주세요! 🏃‍♂️💨"
         }
 
     # 2. 캐시에서 {AppID: 시청자수} 데이터 가져오기
-    ch_data = LATEST_STEAM_RANKS["chzzk"]
+    ch_data = LIVE_STREAMS["chzzk"]
     if not ch_data:
-        return {"status": "success", "data": [], "updated_at": LATEST_STEAM_RANKS["last_updated"]}
+        return {"status": "success", "data": [], "updated_at": LIVE_STREAMS["last_updated"]}
 
     # 3. 시청자 많은 순으로 정렬 후 AppID 리스트 추출
     sorted_items = sorted(ch_data.items(), key=lambda x: x[1], reverse=True)
@@ -495,22 +495,22 @@ async def get_chzzk_streamer_rank(db: AsyncSession = Depends(get_rdb)):
 
     return {
         "status": "success",
-        "last_updated": LATEST_STEAM_RANKS["last_updated"],
+        "last_updated": LIVE_STREAMS["last_updated"],
         "data": final_data
     }
 
 
 @app.get("/streamer-rank/twitch")
 async def get_twitch_streamer_rank(db: AsyncSession = Depends(get_rdb)):
-    if LATEST_STEAM_RANKS["last_updated"] is None:
+    if LIVE_STREAMS["last_updated"] is None:
         return {
             "status": "pending",
             "msg": "트위치 랭킹을 집계 중이에요! 조금만 더 기다려 주세요! 💜"
         }
 
-    tw_data = LATEST_STEAM_RANKS["twitch"]
+    tw_data = LIVE_STREAMS["twitch"]
     if not tw_data:
-        return {"status": "success", "data": [], "updated_at": LATEST_STEAM_RANKS["last_updated"]}
+        return {"status": "success", "data": [], "updated_at": LIVE_STREAMS["last_updated"]}
 
     # 시청자 순 정렬
     sorted_items = sorted(tw_data.items(), key=lambda x: x[1], reverse=True)
@@ -538,7 +538,7 @@ async def get_twitch_streamer_rank(db: AsyncSession = Depends(get_rdb)):
 
     return {
         "status": "success",
-        "last_updated": LATEST_STEAM_RANKS["last_updated"],
+        "last_updated": LIVE_STREAMS["last_updated"],
         "data": final_data
     }
 
