@@ -18,7 +18,8 @@ from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection
 
 from sqlalchemy import text
 
-from services.stream_tasks import update_live_streams
+from services.stream_tasks import update_chzzk_rank, update_twitch_rank
+
 # (만약 stream 관련 라우터가 있다면 임포트 유지)
 # from stream import chzzk, twitch
 # from services.tasks import run_chzzk_update, run_twitch_update
@@ -90,31 +91,30 @@ async def process_steam_rankings():
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
 
-    # 💡 1. 블로킹 수집 (서버 열리기 전 완료)
-    # 서버 접속 전 무조건 있어야 하는 데이터는 await로 기다립니다.
+    # 1. 환율 및 스팀 랭킹 초기 수집
     await process_hana_bank()
     await process_steam_rankings()
 
-    # 💡 2. 스케줄러 세팅
+    # 2. 스케줄러 세팅
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_hana_bank, 'cron', minute='*/5')
     scheduler.add_job(process_steam_rankings, 'cron', minute='0')
 
-    # [추가] 스트리밍 데이터도 매 5분마다 돌도록 등록
-    scheduler.add_job(update_live_streams, 'interval', minutes=5)
+    # 💡 [핵심] 치지직: 매일 14:00, 20:00 (오후 2시, 8시)
+    scheduler.add_job(update_chzzk_rank, 'cron', hour='14,20', minute=0)
+
+    # 💡 [핵심] 트위치: 매일 02:00, 08:00, 14:00, 20:00 (오전/오후 2시, 8시)
+    scheduler.add_job(update_twitch_rank, 'cron', hour='2,8,14,20', minute=0)
 
     scheduler.start()
-    print("⏰ Background Scheduler Started.")
 
-    # 💡 3. 논블로킹 수집 (서버 열린 직후 백그라운드 1회 실행)
-    # await 대신 asyncio.create_task()를 쓰면, 서버는 즉시 켜지고(API 응답 가능)
-    # 뒤에서 조용히 크롤링 작업을 시작합니다.
-    asyncio.create_task(update_live_streams())
+    # 💡 [핵심] 서버 시작 직후 즉시 수집 (Background Task)
+    asyncio.create_task(update_chzzk_rank())
+    asyncio.create_task(update_twitch_rank())
 
-    yield  # <--- 여기서부터 FastAPI 서버가 요청을 받기 시작합니다.
-
+    yield
     scheduler.shutdown()
-    await close_mongo_connection()  # (몽고DB 종료 처리도 잊지 마세요!)
+    await close_mongo_connection()
 
 
 app = FastAPI(title="Exchange Rate & StreamRank API", lifespan=lifespan)
