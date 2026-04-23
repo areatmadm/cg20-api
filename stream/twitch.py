@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from services.twitch_steam import fetch_twitch_ranking
+from services.crowel_twitch import fetch_twitch_ranking
 
 router = APIRouter(
     prefix="/api/twitch",
