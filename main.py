@@ -214,44 +214,63 @@ if __name__ == "__main__":
 # 🌐 [수정된 API] /steam-ranks/{country}/{start}/{end}
 # =========================================================
 @app.get("/steam-ranks/{country}/{start}/{end}")
-def get_steam_ranks(country: str, start: int, end: int):
+async def get_steam_ranks(country: str, start: int, end: int, db: AsyncSession = Depends(get_rdb)):
     """
-    국가별 스팀 랭킹을 지정된 순위 범위만큼 반환합니다.
-    - country: KR, JP, US 중 하나
-    - start: 시작 순위 (1 이상 100 이하)
-    - end: 끝 순위 (1 이상 100 이하, start 이상)
+    국가별 스팀 랭킹을 조회하며, DB에서 이름과 이미지 정보를 합쳐서 반환합니다.
     """
     # 1. 캐시 준비 확인
     if LATEST_STEAM_RANKS["last_updated"] is None:
         return {"status": "pending", "msg": "스팀 랭킹을 수집 중입니다."}
 
-    # 2. 국가 파라미터 대문자 변환 및 유효성 검사
+    # 2. 국가 파라미터 유효성 검사
     country_upper = country.upper()
     if country_upper not in ["KR", "JP", "US"]:
         raise HTTPException(status_code=400, detail="국가는 KR, JP, US 중 하나여야 합니다.")
 
-    # 3. 순위 범위 예외 처리 (대표님 기획 반영!)
+    # 3. 순위 범위 예외 처리
     if start < 1 or end > 100:
-        raise HTTPException(status_code=400, detail=f"순위는 1위부터 100위까지만 조회 가능합니다. (요청: {start}~{end})")
-
+        raise HTTPException(status_code=400, detail=f"순위는 1위부터 100위까지만 가능합니다. (요청: {start}~{end})")
     if start > end:
         raise HTTPException(status_code=400, detail="시작 순위는 끝 순위보다 클 수 없습니다.")
 
-    # 4. 데이터 슬라이싱 (파이썬 인덱스는 0부터 시작하므로 -1 처리)
-    # 예: 1위 ~ 20위 요청 -> 인덱스 0 ~ 19 슬라이싱
-    target_rank_list = LATEST_STEAM_RANKS[country_upper]
+    # 4. 캐시에서 AppID 리스트 슬라이싱
+    target_rank_ids = LATEST_STEAM_RANKS[country_upper]
+    actual_end = min(end, len(target_rank_ids))
+    sliced_ids = target_rank_ids[start - 1: actual_end]
 
-    # 만약 수집된 게임이 100개가 안 될 경우를 대비한 안전장치
-    actual_end = min(end, len(target_rank_list))
+    if not sliced_ids:
+        return {"status": "success", "data": [], "updated_at": LATEST_STEAM_RANKS["last_updated"]}
 
-    sliced_data = target_rank_list[start - 1: actual_end]
+    # 💡 5. [핵심] MariaDB에서 '이름'과 '이미지' 정보 끌어오기
+    # 튜플로 변환하여 SQL IN 절에 전달합니다.
+    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    result = await db.execute(query, {"ids": tuple(sliced_ids)})
+
+    # 조회를 빠르게 하기 위해 {appid: {name, img}} 맵으로 변환
+    game_info_map = {
+        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        for row in result.fetchall()
+    }
+
+    # 💡 6. 랭킹 순서를 유지하면서 프론트엔드가 요구하는 형식으로 조립
+    final_data = []
+    for i, appid in enumerate(sliced_ids):
+        # 만약 DB에 아직 정보가 없다면 기본값 처리 (혹은 빈 값)
+        info = game_info_map.get(appid, {"name": "정보 수집 중...", "headerImage": None})
+
+        final_data.append({
+            "rank": start + i,
+            "appid": appid,
+            "name": info["name"],  # 1. 게임 이름
+            "headerImage": info["headerImage"]  # 2. 헤더 이미지 주소
+        })
 
     return {
         "status": "success",
         "country": country_upper,
         "rank_range": f"{start}~{end}",
-        "count": len(sliced_data),
-        "data": sliced_data,
+        "count": len(final_data),
+        "data": final_data,
         "updated_at": LATEST_STEAM_RANKS["last_updated"]
     }
 
@@ -432,31 +451,95 @@ async def get_game_reviews(game_id: int):
 
     return {"status": "success", "source": "api", "data": reviews}
 
+
 @app.get("/streamer-rank/chzzk")
-async def get_chzzk_streamer_rank():
+async def get_chzzk_streamer_rank(db: AsyncSession = Depends(get_rdb)):
+    # 1. 데이터 수집 여부 확인
     if LATEST_STEAM_RANKS["last_updated"] is None:
         return {
             "status": "pending",
-            "msg": "랭크 수집 중이에요! 네르지 마시고, 조금만 더 기다려 주세요! 🏃‍♂️💨"
+            "msg": "치지직 데이터를 열심히 긁어오고 있어요! 잠시만 기다려 주세요! 🏃‍♂️💨"
         }
-    # 💡 이미 stream_tasks에서 가공된 랭킹 데이터를 그대로 반환
-    return {
-        "status": "success",
-        "last_updated": PLATFORM_RANKINGS["last_updated"],
-        "data": PLATFORM_RANKINGS["chzzk"]
+
+    # 2. 캐시에서 {AppID: 시청자수} 데이터 가져오기
+    ch_data = LATEST_STEAM_RANKS["chzzk"]
+    if not ch_data:
+        return {"status": "success", "data": [], "updated_at": LATEST_STEAM_RANKS["last_updated"]}
+
+    # 3. 시청자 많은 순으로 정렬 후 AppID 리스트 추출
+    sorted_items = sorted(ch_data.items(), key=lambda x: x[1], reverse=True)
+    target_ids = [int(appid) for appid, viewers in sorted_items]
+
+    # 4. 💡 MariaDB에서 이름과 이미지 불러오기
+    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    result = await db.execute(query, {"ids": tuple(target_ids)})
+
+    # 조회를 빠르게 하기 위해 {appid: {name, img}} 맵 생성
+    game_info_map = {
+        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        for row in result.fetchall()
     }
 
+    # 5. 결과 조립 (시청자 수 + 스팀 메타데이터)
+    final_data = []
+    for appid_str, viewers in sorted_items:
+        appid = int(appid_str)
+        info = game_info_map.get(appid, {"name": "정보 수집 중...", "headerImage": None})
+
+        final_data.append({
+            "appid": appid,
+            "name": info["name"],  # 스팀 등록 이름
+            "headerImage": info["headerImage"],  # 스팀 헤더 이미지
+            "viewers": viewers  # 현재 시청자 수
+        })
+
+    return {
+        "status": "success",
+        "last_updated": LATEST_STEAM_RANKS["last_updated"],
+        "data": final_data
+    }
+
+
 @app.get("/streamer-rank/twitch")
-async def get_twitch_streamer_rank():
+async def get_twitch_streamer_rank(db: AsyncSession = Depends(get_rdb)):
     if LATEST_STEAM_RANKS["last_updated"] is None:
         return {
             "status": "pending",
-            "msg": "랭크 수집 중이에요! 네르지 마시고, 조금만 더 기다려 주세요! 🏃‍♂️💨"
+            "msg": "트위치 랭킹을 집계 중이에요! 조금만 더 기다려 주세요! 💜"
         }
+
+    tw_data = LATEST_STEAM_RANKS["twitch"]
+    if not tw_data:
+        return {"status": "success", "data": [], "updated_at": LATEST_STEAM_RANKS["last_updated"]}
+
+    # 시청자 순 정렬
+    sorted_items = sorted(tw_data.items(), key=lambda x: x[1], reverse=True)
+    target_ids = [int(appid) for appid, viewers in sorted_items]
+
+    # DB 조회
+    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    result = await db.execute(query, {"ids": tuple(target_ids)})
+    game_info_map = {
+        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        for row in result.fetchall()
+    }
+
+    # 조립
+    final_data = []
+    for appid_str, viewers in sorted_items:
+        appid = int(appid_str)
+        info = game_info_map.get(appid, {"name": "정보 수집 중...", "headerImage": None})
+        final_data.append({
+            "appid": appid,
+            "name": info["name"],
+            "headerImage": info["headerImage"],
+            "viewers": viewers
+        })
+
     return {
         "status": "success",
-        "last_updated": PLATFORM_RANKINGS["last_updated"],
-        "data": PLATFORM_RANKINGS["twitch"]
+        "last_updated": LATEST_STEAM_RANKS["last_updated"],
+        "data": final_data
     }
 
 @app.get("/insights")
@@ -684,51 +767,86 @@ async def get_genre_trend(db: AsyncSession = Depends(get_rdb)):
 
 
 # ==========================================
-# 🚨 ③ 가짜 할인 의심 게임 (정가 인상 후 할인 등)
+# 🚨 가짜 할인 의심 게임 — main.py 교체 코드
+# /insight/fake-discount-ranking 엔드포인트를 아래로 통째로 교체하세요
 # ==========================================
+
 @app.get("/insight/fake-discount-ranking")
 async def get_fake_discount_ranking(db: AsyncSession = Depends(get_rdb)):
     try:
-        # 정가(regular_price)가 변동된 이력이 있는 게임을 찾습니다.
         query_string = (
-                "SELECT g.game_id, g.game_name, "
-                "MAX" + "(h.regular_price) as max_reg, "
-                        "MIN" + "(h.regular_price) as min_reg, "
-                                "COUNT" + "(h.price) as change_cnt "
-                                          "FROM games g "
-                                          "JOIN game_price_history h ON g.game_id = h.game_id "
-                                          "WHERE h.currency = 'KRW' "
-                                          "GROUP BY g.game_id, g.game_name "
-                                          "HAVING max_reg > min_reg "
-                                          "ORDER BY change_cnt DESC "
-                                          "LIMIT 5"
+            "SELECT g.game_id, g.game_name, "
+            "MAX" + "(h.regular_price) as max_reg, "
+            "MIN" + "(h.regular_price) as min_reg, "
+            "COUNT" + "(DISTINCT h.date) as change_cnt, "
+            "MAX" + "(h.discount_percent) as max_discount "
+            "FROM games g "
+            "JOIN game_price_history h ON g.game_id = h.game_id "
+            "WHERE h.currency = 'KRW' "
+            "GROUP BY g.game_id, g.game_name "
+            "HAVING max_reg > min_reg "
+            "ORDER BY change_cnt DESC "
+            "LIMIT 5"
         )
         result = await db.execute(text(query_string))
 
         data = []
         for row in result.fetchall():
-            # 간단한 휴리스틱 채점 로직 (실제로는 더 정교한 로직 필요)
-            score = min(100, int((row.max_reg - row.min_reg) / row.min_reg * 100) + row.change_cnt * 5)
+            max_reg    = float(row.max_reg)
+            min_reg    = float(row.min_reg)
+            change_cnt = int(row.change_cnt)
+            max_disc   = float(row.max_discount) if row.max_discount else 0
+
+            # 정가 인상 비율 (%)
+            price_hike_pct = round((max_reg - min_reg) / min_reg * 100, 1) if min_reg > 0 else 0
+
+            # 의심 점수 (정가 인상률 + 할인 빈도 가중)
+            score = min(100, int(price_hike_pct) + change_cnt * 5)
 
             if score >= 80:
-                grade, reason = "매우의심", "할인 직전 정가가 대폭 인상된 이력이 있습니다."
+                grade = "매우의심"
             elif score >= 50:
-                grade, reason = "약간의심", "정가 변동폭이 크고 잦은 할인이 발생합니다."
+                grade = "약간의심"
             elif score >= 30:
-                grade, reason = "주의", "가격 변동 패턴이 일정하지 않습니다."
+                grade = "주의"
             else:
-                grade, reason = "정상", "일반적인 가격 인하 패턴입니다."
+                grade = "정상"
+
+            # 구체적인 근거 문장 생성
+            reasons = []
+            if price_hike_pct >= 50:
+                reasons.append(f"정가가 최저 ₩{int(min_reg):,} → 최고 ₩{int(max_reg):,}으로 {price_hike_pct}% 인상된 이력")
+            elif price_hike_pct >= 20:
+                reasons.append(f"정가 변동폭 {price_hike_pct}% (₩{int(min_reg):,} → ₩{int(max_reg):,})")
+            else:
+                reasons.append(f"정가 소폭 변동 {price_hike_pct}%")
+
+            if change_cnt >= 100:
+                reasons.append(f"가격 변동이 {change_cnt}회로 매우 잦음")
+            elif change_cnt >= 30:
+                reasons.append(f"가격 변동 {change_cnt}회")
+
+            if max_disc >= 90:
+                reasons.append(f"최대 {int(max_disc)}% 할인 이력 (상시 할인 의심)")
+            elif max_disc >= 70:
+                reasons.append(f"최대 {int(max_disc)}% 할인 이력")
 
             data.append({
-                "gameId": int(row.game_id),
-                "name": str(row.game_name),
-                "score": score,
-                "grade": grade,
-                "reason": reason
+                "gameId":       int(row.game_id),
+                "name":         str(row.game_name),
+                "score":        score,
+                "grade":        grade,
+                "reason":       " / ".join(reasons),  # 기존 호환용 단일 문장
+                # ▼ 새로 추가된 상세 필드
+                "maxRegPrice":  int(max_reg),
+                "minRegPrice":  int(min_reg),
+                "priceHikePct": price_hike_pct,
+                "changeCnt":    change_cnt,
+                "maxDiscount":  int(max_disc),
             })
 
-        # 점수 순 정렬
         return sorted(data, key=lambda x: x["score"], reverse=True)
+
     except Exception as e:
         print(f"❌ [API 에러] /insight/fake-discount: {e}")
         raise HTTPException(status_code=500, detail="가짜 할인 분석 오류")
@@ -741,7 +859,7 @@ async def get_fake_discount_ranking(db: AsyncSession = Depends(get_rdb)):
 async def get_country_price(game_id: int, db: AsyncSession = Depends(get_rdb)):
     try:
         query_string = (
-            "SELECT g.game_name, p.currency, p.price "
+            "SELECT g.game_name, p.currency, p.price, g.header_image_url "
             "FROM games g "
             "JOIN game_prices p ON g.game_id = p.game_id "
             "WHERE g.game_id = :gid"
@@ -759,7 +877,8 @@ async def get_country_price(game_id: int, db: AsyncSession = Depends(get_rdb)):
         return {
             "gameId": game_id,
             "name": rows[0].game_name,
-            "prices": prices
+            "prices": prices,
+            "headerImage": rows[0].header_image_url
         }
     except Exception as e:
         print(f"❌ [API 에러] /insight/country-price: {e}")
