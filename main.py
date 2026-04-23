@@ -3,20 +3,22 @@ import asyncio
 #import scheduler
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from scrapers import fetch_hana_bank_rates, fetch_all_steam_rankings
 from services.itad_api import sync_itad_price_history
 from services.steam_api import fetch_full_steam_data, insert_full_game_data, fetch_steam_news_only, \
     fetch_steam_reviews_only, save_game_reviews_to_mongo, save_game_news_to_mongo
-from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection, get_mongodb
+from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection, get_mongodb, get_rdb
 
 from sqlalchemy import text
 
-
-
+from services.stream_tasks import update_live_streams
 # (만약 stream 관련 라우터가 있다면 임포트 유지)
 # from stream import chzzk, twitch
 # from services.tasks import run_chzzk_update, run_twitch_update
@@ -40,7 +42,7 @@ from sqlalchemy import text
 #
 # # Steam API Fetch 대기열
 # PENDING_QUEUE = {}
-from store import LATEST_RATES, LATEST_STEAM_RANKS, PENDING_QUEUE
+from store import LATEST_RATES, LATEST_STEAM_RANKS, PENDING_QUEUE, PLATFORM_RANKINGS
 
 scheduler = AsyncIOScheduler()
 
@@ -87,27 +89,41 @@ async def process_steam_rankings():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
-    # 💡 [핵심] 서버가 딱 켜지자마자 환율을 한 번 긁어옵니다. (안 그러면 첫 5분 동안은 0원이 뜹니다)
+
+    # 💡 1. 블로킹 수집 (서버 열리기 전 완료)
+    # 서버 접속 전 무조건 있어야 하는 데이터는 await로 기다립니다.
     await process_hana_bank()
     await process_steam_rankings()
 
+    # 💡 2. 스케줄러 세팅
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_hana_bank, 'cron', minute='*/5')
-    # 💡 스팀 랭킹은 1시간마다 (스팀 랭킹은 자주 안 변합니다)
     scheduler.add_job(process_steam_rankings, 'cron', minute='0')
 
-    # scheduler.add_job(process_chzzk_ranking, 'cron', hour='14,20', minute='0')
-    # scheduler.add_job(process_twitch_ranking, 'cron', hour='2,8,14,20', minute='0')
+    # [추가] 스트리밍 데이터도 매 5분마다 돌도록 등록
+    scheduler.add_job(update_live_streams, 'interval', minutes=5)
 
     scheduler.start()
     print("⏰ Background Scheduler Started.")
 
-    yield
+    # 💡 3. 논블로킹 수집 (서버 열린 직후 백그라운드 1회 실행)
+    # await 대신 asyncio.create_task()를 쓰면, 서버는 즉시 켜지고(API 응답 가능)
+    # 뒤에서 조용히 크롤링 작업을 시작합니다.
+    asyncio.create_task(update_live_streams())
+
+    yield  # <--- 여기서부터 FastAPI 서버가 요청을 받기 시작합니다.
 
     scheduler.shutdown()
+    await close_mongo_connection()  # (몽고DB 종료 처리도 잊지 마세요!)
 
 
 app = FastAPI(title="Exchange Rate & StreamRank API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 
 # app.include_router(chzzk.router)
@@ -412,3 +428,125 @@ async def get_game_reviews(game_id: int):
     await save_game_reviews_to_mongo(game_id, reviews)
 
     return {"status": "success", "source": "api", "data": reviews}
+
+@app.get("/streamer-rank/chzzk")
+async def get_chzzk_streamer_rank():
+    # 💡 이미 stream_tasks에서 가공된 랭킹 데이터를 그대로 반환
+    return {
+        "status": "success",
+        "last_updated": PLATFORM_RANKINGS["last_updated"],
+        "data": PLATFORM_RANKINGS["chzzk"]
+    }
+
+@app.get("/streamer-rank/twitch")
+async def get_twitch_streamer_rank():
+    return {
+        "status": "success",
+        "last_updated": PLATFORM_RANKINGS["last_updated"],
+        "data": PLATFORM_RANKINGS["twitch"]
+    }
+
+@app.get("/insights")
+async def get_dashboard_insights(db: AsyncSession = Depends(get_rdb)):
+    try:
+        # 💡 1. 캐시에서 한국(KR) 랭킹 AppID 리스트 가져오기
+        kr_appids = LATEST_STEAM_RANKS.get("KR", [])
+
+        # 만약 아직 랭킹 수집이 안 되었다면 빈 값 반환
+        if not kr_appids:
+            return {"status": "pending", "message": "랭킹 데이터를 수집 중입니다."}
+
+        # SQL IN 절에 넣기 위해 튜플로 변환 (요소가 1개일 때를 대비해 문자열 처리 조심해야 하지만, 튜플 전달이 가장 안전함)
+        appids_tuple = tuple(kr_appids)
+
+        # 📊 1. 장르별 점유율 (Top 6)
+        res_genre = await db.execute(text("""
+                                          SELECT g.genre_name, COUNT(gg.game_id) as cnt
+                                          FROM genres g
+                                                   JOIN game_genres gg ON g.genre_id = gg.genre_id
+                                          WHERE gg.game_id IN :appids
+                                          GROUP BY g.genre_name
+                                          ORDER BY cnt DESC LIMIT 6
+                                          """), {"appids": appids_tuple})
+        genres = [{"name": row[0], "value": row[1]} for row in res_genre.fetchall()]
+
+        # 🍩 2. 무료 vs 유료 비율
+        res_free = await db.execute(text("""
+                                         SELECT game_is_free, COUNT(*) as cnt
+                                         FROM games
+                                         WHERE game_id IN :appids
+                                         GROUP BY game_is_free
+                                         """), {"appids": appids_tuple})
+        free_paid_data = [{"name": "무료", "value": 0}, {"name": "유료", "value": 0}]
+        for row in res_free.fetchall():
+            if row[0] == 1:
+                free_paid_data[0]["value"] = row[1]
+            else:
+                free_paid_data[1]["value"] = row[1]
+
+        # 💰 3. 최고가 / 최저가 게임 (무료게임 제외)
+        res_price = await db.execute(text("""
+                                          SELECT g.game_name, gp.price
+                                          FROM games g
+                                                   JOIN game_prices gp ON g.game_id = gp.game_id
+                                          WHERE g.game_id IN :appids
+                                            AND gp.currency = 'KRW'
+                                            AND g.game_is_free = 0
+                                          ORDER BY gp.price DESC
+                                          """), {"appids": appids_tuple})
+        prices = res_price.fetchall()
+        highest = {"name": prices[0][0], "price": float(prices[0][1])} if prices else None
+        lowest = {"name": prices[-1][0], "price": float(prices[-1][1])} if prices else None
+
+        # 🌐 4. 지원 언어 TOP 5
+        res_lang = await db.execute(text("""
+                                         SELECT l.language_name, COUNT(gl.game_id) as cnt
+                                         FROM languages l
+                                                  JOIN game_languages gl ON l.language_id = gl.language_id
+                                         WHERE gl.game_id IN :appids
+                                         GROUP BY l.language_name
+                                         ORDER BY cnt DESC LIMIT 5
+                                         """), {"appids": appids_tuple})
+        languages = [{"name": row[0], "value": row[1]} for row in res_lang.fetchall()]
+
+        # 💻 5. 운영체제 지원 비율
+        res_os = await db.execute(text("""
+                                       SELECT SUM(os_windows), SUM(os_mac), SUM(os_linux)
+                                       FROM games
+                                       WHERE game_id IN :appids
+                                       """), {"appids": appids_tuple})
+        os_row = res_os.fetchone()
+        os_support = [
+            {"name": "Windows", "value": int(os_row[0] or 0)},
+            {"name": "Mac", "value": int(os_row[1] or 0)},
+            {"name": "Linux", "value": int(os_row[2] or 0)},
+        ]
+
+        # 📅 6. 출시 연도별 트렌드 (최근 10년 위주)
+        # 📅 6. 출시 연도별 트렌드 (최근 10년 위주)
+        res_year = await db.execute(text("""
+                                         SELECT YEAR (game_releaseDate) as yr, COUNT (*) as cnt
+                                         FROM games
+                                         WHERE game_id IN :appids
+                                           AND game_releaseDate IS NOT NULL
+                                           AND YEAR (game_releaseDate)
+                                             > 2010
+                                         GROUP BY yr
+                                         ORDER BY yr ASC
+                                         """), {"appids": appids_tuple})
+        years = [{"name": str(row[0]), "value": row[1]} for row in res_year.fetchall()]
+
+        # 🎁 프론트엔드에 한 번에 전달
+        return {
+            "status": "success",
+            "data": {
+                "genreShare": genres,
+                "freeVsPaid": free_paid_data,
+                "priceExtremes": {"highest": highest, "lowest": lowest},
+                "languages": languages,
+                "osSupport": os_support,
+                "releaseYears": years
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
