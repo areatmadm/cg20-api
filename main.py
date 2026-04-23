@@ -330,7 +330,7 @@ async def get_game_price(appid: int):
 # ==========================================
 # 📈 2. 가격 추이 분석 API (역대 최저가 비교)
 # ==========================================
-@app.get("/steam-game/{appid}/price_detail/{currency}")
+@app.get("/steam-game/{appid}/price-detail/{currency}")
 async def get_game_price_detail(appid: int, currency: str):
     currency = currency.upper()
     if currency not in ["KRW", "JPY", "USD"]:
