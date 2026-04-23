@@ -243,12 +243,12 @@ async def get_steam_ranks(country: str, start: int, end: int, db: AsyncSession =
 
     # 💡 5. [핵심] MariaDB에서 '이름'과 '이미지' 정보 끌어오기
     # 튜플로 변환하여 SQL IN 절에 전달합니다.
-    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    query = text("SELECT game_id, game_name, header_image_url FROM games WHERE game_id IN :ids")
     result = await db.execute(query, {"ids": tuple(sliced_ids)})
 
     # 조회를 빠르게 하기 위해 {appid: {name, img}} 맵으로 변환
     game_info_map = {
-        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        row.game_id: {"name": row.game_name, "headerImage": row.header_image_url}
         for row in result.fetchall()
     }
 
@@ -471,12 +471,12 @@ async def get_chzzk_streamer_rank(db: AsyncSession = Depends(get_rdb)):
     target_ids = [int(appid) for appid, viewers in sorted_items]
 
     # 4. 💡 MariaDB에서 이름과 이미지 불러오기
-    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    query = text("SELECT game_id, game_name, header_image_url FROM games WHERE game_id IN :ids")
     result = await db.execute(query, {"ids": tuple(target_ids)})
 
     # 조회를 빠르게 하기 위해 {appid: {name, img}} 맵 생성
     game_info_map = {
-        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        row.game_id: {"name": row.game_name, "headerImage": row.header_image_url}
         for row in result.fetchall()
     }
 
@@ -517,10 +517,10 @@ async def get_twitch_streamer_rank(db: AsyncSession = Depends(get_rdb)):
     target_ids = [int(appid) for appid, viewers in sorted_items]
 
     # DB 조회
-    query = text("SELECT game_id, game_name, game_headerImage FROM games WHERE game_id IN :ids")
+    query = text("SELECT game_id, game_name, header_image_url FROM games WHERE game_id IN :ids")
     result = await db.execute(query, {"ids": tuple(target_ids)})
     game_info_map = {
-        row.game_id: {"name": row.game_name, "headerImage": row.game_headerImage}
+        row.game_id: {"name": row.game_name, "headerImage": row.header_image_url}
         for row in result.fetchall()
     }
 
