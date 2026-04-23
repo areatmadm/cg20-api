@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from database import AsyncSessionLocal
 from services.steam_api import fetch_full_steam_data, insert_full_game_data
+from store import PENDING_QUEUE
 
 
 # ==========================================
@@ -158,35 +159,44 @@ async def fetch_all_steam_rankings() -> dict:
     banned_appids = set()
 
     async with AsyncSessionLocal() as db:
-        # [Step 1] DB에 이미 있는 게임 한꺼번에 조회 (속도 최적화)
+        # [Step 1] DB에 이미 있는 게임 한꺼번에 조회
         if all_appids:
-            # 튜플 형태로 변환하여 IN 쿼리 실행
             query = text("SELECT game_id FROM games WHERE game_id IN :appids")
             result = await db.execute(query, {"appids": tuple(all_appids)})
             existing_appids = {row[0] for row in result}
-
-            # DB에 이미 있는 애들은 일단 '유효한 게임'으로 분류
             valid_appids.update(existing_appids)
-
-            # DB에 없는 게임들만 추출
             new_appids = all_appids - existing_appids
             print(f"  🔍 분석 완료: 기존 게임 {len(existing_appids)}개, 신규 게임 {len(new_appids)}개 확인.")
         else:
             new_appids = set()
 
-        # [Step 2 & 3] 새로운 게임만 스팀 API 호출 및 저장
+        # 💡 [핵심 수정] 이 아래의 for 루프가 if/else와 같은 라인(밖)에 있어야 합니다!
+        # [Step 2 & 3] 새로운 게임 수집 루프
         for appid in new_appids:
-            full_info = await fetch_full_steam_data(appid)
+            result = await fetch_full_steam_data(appid)
 
-            if full_info:
-                await insert_full_game_data(db, full_info)
+            if isinstance(result, dict):
+                # 1. 수집 성공!
+                await insert_full_game_data(db, result)
+                PENDING_QUEUE.pop(appid, None)
                 valid_appids.add(appid)
                 print(f"  ✨ [신규등록] AppID {appid} 저장 완료.")
-            else:
-                banned_appids.add(appid)
-                print(f"  🛑 [제외/지역락] AppID {appid}")
 
-            # 💡 [필수] 100개가 한꺼번에 DB에 들어갈 때 API 밴을 피하기 위한 1초 매너타임!
+            elif result == "BANNED":
+                # 2. 🛑 영구 제외 (지역락 등)
+                banned_appids.add(appid)
+                PENDING_QUEUE.pop(appid, None)  # 대기열에 있었다면 삭제
+                print(f"  🛑 [영구제외] AppID {appid}는 한국 스토어 미지원 게임입니다.")
+
+            elif result == "RETRY":
+                # 3. ⏳ 일시적 실패 (대기열행)
+                if appid not in PENDING_QUEUE:
+                    PENDING_QUEUE[appid] = {
+                        'retry_count': 0,
+                        'last_attempt': datetime.now()
+                    }
+                print(f"  ⏳ [대기열행] AppID {appid} - API 제한으로 나중에 다시 합니다.")
+
             await asyncio.sleep(1.0)
 
     # 4. 최종 랭킹 리스트 구성 (한국 스토어에서 유효한 게임들만 필터링)

@@ -1,4 +1,6 @@
 # main.py
+import asyncio
+#import scheduler
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -6,28 +8,40 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 
 from scrapers import fetch_hana_bank_rates, fetch_all_steam_rankings
+from services.itad_api import sync_itad_price_history
+from services.steam_api import fetch_full_steam_data, insert_full_game_data
+from database import AsyncSessionLocal
+
+from sqlalchemy import text
+
+
 
 # (만약 stream 관련 라우터가 있다면 임포트 유지)
-# from stream import chzzk, twitch 
+# from stream import chzzk, twitch
 # from services.tasks import run_chzzk_update, run_twitch_update
 
 # =========================================================
 # 💾 [핵심] 환율 캐시 (최신 환율을 메모리에 들고 있습니다)
 # =========================================================
-LATEST_RATES = {
-    "standard_usd": 0.0,
-    "standard_jpy": 0.0,
-    "last_updated": None
-}
+# LATEST_RATES = {
+#     "standard_usd": 0.0,
+#     "standard_jpy": 0.0,
+#     "last_updated": None
+# }
+#
+# # [신규] 스팀 랭킹 캐시
+# LATEST_STEAM_RANKS = {
+#     "KR": [],
+#     "JP": [],
+#     "US": [],
+#     "last_updated": None
+# }
+#
+# # Steam API Fetch 대기열
+# PENDING_QUEUE = {}
+from store import LATEST_RATES, LATEST_STEAM_RANKS, PENDING_QUEUE
 
-# [신규] 스팀 랭킹 캐시
-LATEST_STEAM_RANKS = {
-    "KR": [],
-    "JP": [],
-    "US": [],
-    "last_updated": None
-}
-
+scheduler = AsyncIOScheduler()
 
 # ---------------------------------------------------------
 # 스크래핑 작업 (매 5분)
@@ -96,6 +110,50 @@ app = FastAPI(title="Exchange Rate & StreamRank API", lifespan=lifespan)
 
 # app.include_router(chzzk.router)
 # app.include_router(twitch.router)
+
+async def process_memory_queue():
+    """5분마다 실행되며 파이썬 메모리(PENDING_QUEUE)에 쌓인 게임을 재수집합니다."""
+
+    if not PENDING_QUEUE:
+        return  # 큐가 비어있으면 쿨하게 패스
+
+    # 💡 딕셔너리에서 재시도 5회 미만인 게임들을 '가장 오래된 순'으로 5개만 뽑아냅니다.
+    target_items = sorted(
+        [(k, v) for k, v in PENDING_QUEUE.items() if v['retry_count'] < 5],
+        key=lambda x: x[1]['last_attempt']
+    )[:5]
+
+    if not target_items:
+        return
+
+    print(f"\n[{datetime.now()}] 🛒 --- 메모리 대기열 처리 시작 ({len(target_items)}개) ---")
+
+    async with AsyncSessionLocal() as db:
+        for appid, meta in target_items:
+            full_info = await fetch_full_steam_data(appid)
+
+            if full_info:
+                # 성공! DB 적재 후 메모리 큐에서 삭제
+                await insert_full_game_data(db, full_info)
+                del PENDING_QUEUE[appid]
+                print(f"  ✅ [메모리 큐 정리 완료] AppID {appid} 저장 성공!")
+            else:
+                # 또 실패... 카운트 1 올리고 시간 갱신
+                PENDING_QUEUE[appid]['retry_count'] += 1
+                PENDING_QUEUE[appid]['last_attempt'] = datetime.now()
+                print(f"  ⚠️ [메모리 큐 지연] AppID {appid} 실패 (재시도: {PENDING_QUEUE[appid]['retry_count']}회)")
+
+            # API 제한 방어용 2초 휴식
+            await asyncio.sleep(2.0)
+
+        print(f"[{datetime.now()}] 🛒 --- 메모리 대기열 처리 완료 ---")
+
+scheduler.add_job(
+    process_memory_queue,
+    trigger='interval',
+    minutes=5,
+    id='process_memory_queue'
+)
 
 @app.get("/")
 def read_root():
@@ -175,3 +233,144 @@ def get_steam_ranks(country: str, start: int, end: int):
         "data": sliced_data,
         "updated_at": LATEST_STEAM_RANKS["last_updated"]
     }
+
+
+@app.get("/steam-game/{appid}")
+async def get_steam_game_info(appid: int):
+    """
+    특정 스팀 게임의 상세 정보를 조회합니다.
+    1. DB 확인 -> 2. 없으면 실시간 스팀 API 호출 -> 3. 지역락/에러 처리 및 DB 적재
+    """
+    async with AsyncSessionLocal() as db:
+        # [Step 1] DB에 이미 정보가 있는지 확인
+        query = text("SELECT * FROM games WHERE game_id = :appid")
+        result = await db.execute(query, {"appid": appid})
+        game_row = result.fetchone()
+
+        if game_row:
+            # DB에 있으면 바로 반환 (딕셔너리 형태로 변환)
+            return {
+                "status": "success",
+                "source": "database",
+                "data": dict(game_row._mapping)
+            }
+
+        # [Step 2] DB에 정보가 없다면? 스팀 API 실시간 호출 (Lazy Loading)
+        print(f"🔍 [API 요청] DB에 정보 없음. AppID {appid} 실시간 수집 시작...")
+        full_info = await fetch_full_steam_data(appid)
+
+        # [Step 3] 대표님 요청사항: 지역락(BANNED) 처리
+        if full_info == "BANNED":
+            return {
+                "status": "country_unavailable",
+                "message": "한국 스토어에서 지역락(구매 제한) 또는 삭제된 게임입니다.",
+                "appid": appid
+            }
+
+        # [Step 4] 스팀 API 호출 제한 또는 통신 에러 처리
+        elif full_info == "RETRY" or full_info is None:
+            # 프론트엔드에게는 HTTP 503(Service Unavailable) 또는 적절한 상태 코드로 응답
+            raise HTTPException(
+                status_code=503,
+                detail="스팀 서버와 통신이 지연되고 있습니다. 잠시 후 다시 시도해주세요."
+            )
+
+        # [Step 5] 수집 성공! DB에 즉시 적재하고 프론트엔드에 반환
+        try:
+            await insert_full_game_data(db, full_info)
+            print(f"✨ [API 실시간 적재] AppID {appid} 저장 완료.")
+
+            return {
+                "status": "success",
+                "source": "live_fetch",
+                "data": full_info
+            }
+        except Exception as e:
+            print(f"❌ [API 적재 에러] AppID {appid} 저장 중 오류: {e}")
+            raise HTTPException(status_code=500, detail="데이터베이스 저장 중 오류가 발생했습니다.")
+
+
+# ==========================================
+# 💰 1. 현재 가격 조회 API (3개국 통화)
+# ==========================================
+@app.get("/steam-game/{appid}/price")
+async def get_game_price(appid: int):
+    """
+    특정 게임의 현재 KRW, JPY, USD 가격을 반환합니다.
+    """
+    async with AsyncSessionLocal() as db:
+        # [Step 1] DB에서 현재 가격 조회
+        query = text("SELECT currency, price FROM game_prices WHERE game_id = :appid")
+        result = await db.execute(query, {"appid": appid})
+        prices = {row[0]: float(row[1]) for row in result.fetchall()}
+
+        # [Step 2] 데이터가 없다면? 실시간 수집 시도
+        if not prices:
+            print(f"🔍 [Price API] 정보 없음. AppID {appid} 가격 실시간 수집 시작...")
+            full_info = await fetch_full_steam_data(appid)
+
+            if isinstance(full_info, dict):
+                # 수집 성공 시 DB 저장 후 결과 구성
+                await insert_full_game_data(db, full_info)
+                prices = {cc: float(p) for cc, p in full_info['prices'].items()}
+            elif full_info == "BANNED":
+                return {"status": "country_unavailable", "message": "지역락 게임은 가격 조회가 불가능합니다."}
+            else:
+                raise HTTPException(status_code=503, detail="스팀 API 통신 지연. 잠시 후 시도해주세요.")
+
+        return {
+            "status": "success",
+            "appid": appid,
+            "prices": prices
+        }
+
+
+# ==========================================
+# 📈 2. 가격 추이 분석 API (역대 최저가 비교)
+# ==========================================
+@app.get("/steam-game/{appid}/price_detail/{currency}")
+async def get_game_price_detail(appid: int, currency: str):
+    currency = currency.upper()
+    if currency not in ["KRW", "JPY", "USD"]:
+        raise HTTPException(status_code=400, detail="지원하지 않는 통화입니다.")
+
+    async with AsyncSessionLocal() as db:
+        # [Step 1] DB에서 히스토리 조회
+        query = text("""
+                     SELECT date, price, regular_price, discount_percent
+                     FROM game_price_history
+                     WHERE game_id = :appid AND currency = :currency
+                     ORDER BY date ASC
+                     """)
+        result = await db.execute(query, {"appid": appid, "currency": currency})
+        history = [dict(row._mapping) for row in result.fetchall()]
+
+        # [Step 2] 데이터가 없다면? ITAD API 동기화 실행
+        if not history:
+            print(f"📊 [History API] 정보 없음. AppID {appid} ITAD 히스토리 수집 시작...")
+            # ITAD 데이터 수집 및 DB 적재 (itad_api.py 함수 호출)
+            await sync_itad_price_history(db, appid)
+
+            # 적재 후 다시 조회
+            result = await db.execute(query, {"appid": appid, "currency": currency})
+            history = [dict(row._mapping) for row in result.fetchall()]
+
+        # [Step 3] 여전히 없거나 수집 실패 시 처리
+        if not history:
+            raise HTTPException(status_code=404, detail="해당 게임은 가격 추이 정보를 제공하지 않습니다.")
+
+        # [Step 4] 분석 로직 (최저가 비교 등)
+        prices = [float(h['price']) for h in history]
+        lowest_price = min(prices)
+        latest_price = prices[-1]
+
+        return {
+            "status": "success",
+            "analysis": {
+                "latest_price": latest_price,
+                "lowest_price": lowest_price,
+                "is_lowest": latest_price <= lowest_price,
+                "buying_advice": "🔥 역대 최저가!" if latest_price <= lowest_price else "⏳ 할인 대기 권장"
+            },
+            "history": history
+        }

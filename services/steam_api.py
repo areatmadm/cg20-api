@@ -11,6 +11,12 @@ from datetime import datetime
 # 📡 1. 스팀 API - 가격 수집 (KRW, JPY, USD)
 # ==========================================
 async def fetch_price_for_currency(appid: int, currency: str) -> float:
+    if currency == 'USD':
+        currency = 'US'
+    elif currency == 'JPY':
+        currency = 'JP'
+    else:
+        currency = 'KR'
     url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc={currency}"
     try:
         res = await asyncio.to_thread(requests.get, url, timeout=5)
@@ -30,13 +36,40 @@ async def fetch_price_for_currency(appid: int, currency: str) -> float:
 # ==========================================
 # 📡 2. 스팀 API - 데이터 상세 수집 (대표님 스키마 맞춤)
 # ==========================================
-async def fetch_full_steam_data(appid: int) -> dict | None:
-    url = f"https://store.steampowered.com/api/appdetails?appids={appid}&l=korean"
-    try:
-        res = await asyncio.to_thread(requests.get, url, timeout=5)
-        data = res.json().get(str(appid), {})
-        if not data.get('success'): return None
+async def fetch_full_steam_data(appid: int) -> dict | str | None:
+    """
+    결과값 상세:
+    - dict: 수집 성공 (게임 상세 정보 포함)
+    - "BANNED": 스팀이 'success: false'를 반환 (한국 지역락, 비공개, 또는 삭제된 게임)
+    - "RETRY": API 호출 제한(429) 또는 기타 통신 에러 (나중에 다시 시도해야 함)
+    """
+    url = f"https://store.steampowered.com/api/appdetails?appids={appid}&l=korean&cc=KR"
 
+    try:
+        # 1. API 호출
+        res = await asyncio.to_thread(requests.get, url, timeout=5)
+
+        # 2. API 제한(Rate Limit) 확인
+        if res.status_code == 429:
+            print(f"⚠️ [Steam API] {appid} 호출 제한(429). 대기열(RETRY)로 보냅니다.")
+            return "RETRY"
+
+        # 3. JSON 데이터 파싱 및 무결성 확인
+        json_resp = res.json()
+        if not json_resp or str(appid) not in json_resp:
+            return "RETRY"  # 응답이 아예 없거나 구조가 깨진 경우 재시도
+
+        data = json_resp[str(appid)]
+
+        # 4. [핵심] 지역락/삭제 여부 확인
+        # success가 False인 경우, 해당 국가(KR)에서 조회가 불가능한 게임입니다.
+        if not data.get('success'):
+            print(f"🛑 [Steam API] {appid}는 한국 지역락 또는 삭제된 게임입니다. (BANNED)")
+            return "BANNED"
+
+        # -----------------------------------------
+        # 여기서부터는 데이터가 확실히 있는 경우입니다.
+        # -----------------------------------------
         gd = data['data']
 
         # 날짜 포맷 변환 (Steam: '2024년 4월 22일' -> DB: '2024-04-22')
@@ -81,15 +114,16 @@ async def fetch_full_steam_data(appid: int) -> dict | None:
                 is_voice = 1 if 'audio' in l_item.lower() or 'voice' in l_item.lower() else 0
                 if l_name: result['languages'].append({'name': l_name, 'is_voice': is_voice})
 
-        # 3개국 가격 수집
+        # 3개국 가격 수집 및 결과 반환
         tasks = [fetch_price_for_currency(appid, cc) for cc in ['KRW', 'JPY', 'USD']]
         prices = await asyncio.gather(*tasks)
         result['prices'] = {'KRW': prices[0], 'JPY': prices[1], 'USD': prices[2]}
 
         return result
+
     except Exception as e:
-        print(f"❌ [Steam API] {appid} 에러: {e}")
-        return None
+        print(f"❌ [Steam API] {appid} 예외 발생: {e}")
+        return "RETRY"  # 네트워크 단절 등 알 수 없는 에러는 일단 재시도
 
 
 # ==========================================
