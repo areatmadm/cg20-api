@@ -243,7 +243,8 @@ async def get_steam_ranks(country: str, start: int, end: int, db: AsyncSession =
 
     # 💡 5. [핵심] MariaDB에서 '이름'과 '이미지' 정보 끌어오기
     # 튜플로 변환하여 SQL IN 절에 전달합니다.
-    query = text("SELECT game_id, game_name, header_image_url FROM games WHERE game_id IN :ids")
+    #query = text("SELECT game_id, game_name, header_image_url FROM games WHERE game_id IN :ids")
+    query = text("SELECT g.game_id, g.game_name, g.header_image_url, p.price FROM games g JOIN game_prices p ON g.game_id = p.game_id WHERE p.currency = 'KRW' AND g.game_id IN :ids")
     result = await db.execute(query, {"ids": tuple(sliced_ids)})
 
     # 조회를 빠르게 하기 위해 {appid: {name, img}} 맵으로 변환
