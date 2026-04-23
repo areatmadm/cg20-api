@@ -1,5 +1,6 @@
 # main.py
 import asyncio
+import re
 #import scheduler
 
 from contextlib import asynccontextmanager
@@ -7,6 +8,8 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
+
+from collections import Counter
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -533,9 +536,8 @@ async def get_dashboard_insights(db: AsyncSession = Depends(get_rdb)):
         ]
 
         # 📅 6. 출시 연도별 트렌드 (최근 10년 위주)
-        # 📅 6. 출시 연도별 트렌드 (최근 10년 위주)
         res_year = await db.execute(text("""
-                                         SELECT YEAR (game_releaseDate) as yr, COUNT (*) as cnt
+                                         SELECT YEAR(game_releaseDate) as yr, COUNT(*) as cnt
                                          FROM games
                                          WHERE game_id IN :appids
                                            AND game_releaseDate IS NOT NULL
@@ -560,3 +562,257 @@ async def get_dashboard_insights(db: AsyncSession = Depends(get_rdb)):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ==========================================
+# 📊 데이터 인사이트 - 출시연도별 할인 빈도
+# ==========================================
+@app.get("/insights/discount-frequency")
+async def get_discount_frequency(db: AsyncSession = Depends(get_rdb)):
+    try:
+        # 💡 에디터의 악랄한 SQL 자동 정렬을 완벽하게 회피하는 "문자열 쪼개기 + 더하기" 꼼수!
+        # 이렇게 하면 IDE가 SQL로 인식하지 못해 강제로 띄어쓰기를 넣지 못합니다.
+        query_string = (
+            "SELECT YEAR" + "(g.game_releaseDate) as release_year, "
+            "COUNT" + "(DISTINCT g.game_id) as game_count, "
+            "COALESCE" + "(" + "SUM" + "(CASE WHEN h.discount_percent > 0 THEN 1.0 ELSE 0.0 END) / "
+            "COUNT" + "(h.game_id) * 100, 0) as avg_frequency "
+            "FROM games g JOIN game_price_history h ON g.game_id = h.game_id "
+            "WHERE g.game_releaseDate IS NOT NULL AND YEAR" + "(g.game_releaseDate) BETWEEN 2010 AND YEAR" + "(CURDATE()) "
+            "GROUP BY YEAR" + "(g.game_releaseDate) "
+            "ORDER BY release_year ASC"
+        )
+        query = text(query_string)
+
+        result = await db.execute(query)
+
+        data = []
+        for row in result.fetchall():
+            data.append({
+                "year": int(row.release_year),
+                "avgDiscount": round(float(row.avg_frequency), 1),
+                "gameCount": int(row.game_count)
+            })
+
+        return data
+
+    except Exception as e:
+        print(f"❌ [API 에러] /insights/discount-frequency: {e}")
+        raise HTTPException(status_code=500, detail="데이터 통계 분석 중 오류가 발생했습니다.")
+
+
+# ==========================================
+# 🎮 게임 검색 목록 (드롭다운용)
+# ==========================================
+@app.get("/games")
+async def get_games_list(limit: int = 200, db: AsyncSession = Depends(get_rdb)):
+    try:
+        # GROUP_CONCAT을 이용해 장르를 쉼표로 묶어서 가져옵니다.
+        query_string = (
+                "SELECT g.game_id, g.game_name, "
+                "GROUP_CONCAT" + "(gen.genre_name SEPARATOR ',') as genres "
+                                 "FROM games g "
+                                 "LEFT JOIN game_genres gg ON g.game_id = gg.game_id "
+                                 "LEFT JOIN genres gen ON gg.genre_id = gen.genre_id "
+                                 "GROUP BY g.game_id, g.game_name "
+                                 "ORDER BY g.game_id DESC "
+                                 "LIMIT :limit"
+        )
+        result = await db.execute(text(query_string), {"limit": limit})
+
+        data = []
+        for row in result.fetchall():
+            data.append({
+                "gameId": int(row.game_id),
+                "name": str(row.game_name),
+                "genres": row.genres.split(",") if row.genres else []
+            })
+        return data
+    except Exception as e:
+        print(f"❌ [API 에러] /games: {e}")
+        raise HTTPException(status_code=500, detail="게임 목록을 불러오지 못했습니다.")
+
+
+# ==========================================
+# 📊 ① 연도별 장르 트렌드 (히트맵용)
+# ==========================================
+@app.get("/insight/genre-trend")
+async def get_genre_trend(db: AsyncSession = Depends(get_rdb)):
+    try:
+        query_string = (
+                "SELECT YEAR" + "(g.game_releaseDate) as yr, "
+                                "gen.genre_name, "
+                                "COUNT" + "(DISTINCT g.game_id) as cnt "
+                                          "FROM games g "
+                                          "JOIN game_genres gg ON g.game_id = gg.game_id "
+                                          "JOIN genres gen ON gg.genre_id = gen.genre_id "
+                                          "WHERE g.game_releaseDate IS NOT NULL "
+                                          "AND YEAR" + "(g.game_releaseDate) BETWEEN 2018 AND YEAR" + "(CURDATE()) "
+                                                                                                      "GROUP BY yr, gen.genre_name"
+        )
+        result = await db.execute(text(query_string))
+        rows = result.fetchall()
+
+        # 파이썬에서 매트릭스 형태로 데이터 가공
+        years = sorted(list(set(int(r.yr) for r in rows)))
+
+        # 상위 5개 장르만 추출 (노이즈 방지)
+        genre_totals = {}
+        for r in rows:
+            genre_totals[r.genre_name] = genre_totals.get(r.genre_name, 0) + r.cnt
+        top_genres = sorted(genre_totals, key=genre_totals.get, reverse=True)[:5]
+
+        matrix = []
+        for genre in top_genres:
+            genre_row = []
+            for year in years:
+                # 해당 연도의 전체 게임 수 대비 해당 장르 비율(%) 계산
+                year_total = sum(r.cnt for r in rows if int(r.yr) == year)
+                g_count = sum(r.cnt for r in rows if int(r.yr) == year and r.genre_name == genre)
+                pct = round((g_count / year_total) * 100, 1) if year_total > 0 else 0
+                genre_row.append(pct)
+            matrix.append(genre_row)
+
+        return {
+            "years": years,
+            "genres": top_genres,
+            "matrix": matrix
+        }
+    except Exception as e:
+        print(f"❌ [API 에러] /insight/genre-trend: {e}")
+        raise HTTPException(status_code=500, detail="장르 트렌드 오류")
+
+
+# ==========================================
+# 🚨 ③ 가짜 할인 의심 게임 (정가 인상 후 할인 등)
+# ==========================================
+@app.get("/insight/fake-discount-ranking")
+async def get_fake_discount_ranking(db: AsyncSession = Depends(get_rdb)):
+    try:
+        # 정가(regular_price)가 변동된 이력이 있는 게임을 찾습니다.
+        query_string = (
+                "SELECT g.game_id, g.game_name, "
+                "MAX" + "(h.regular_price) as max_reg, "
+                        "MIN" + "(h.regular_price) as min_reg, "
+                                "COUNT" + "(h.price) as change_cnt "
+                                          "FROM games g "
+                                          "JOIN game_price_history h ON g.game_id = h.game_id "
+                                          "WHERE h.currency = 'KRW' "
+                                          "GROUP BY g.game_id, g.game_name "
+                                          "HAVING max_reg > min_reg "
+                                          "ORDER BY change_cnt DESC "
+                                          "LIMIT 5"
+        )
+        result = await db.execute(text(query_string))
+
+        data = []
+        for row in result.fetchall():
+            # 간단한 휴리스틱 채점 로직 (실제로는 더 정교한 로직 필요)
+            score = min(100, int((row.max_reg - row.min_reg) / row.min_reg * 100) + row.change_cnt * 5)
+
+            if score >= 80:
+                grade, reason = "매우의심", "할인 직전 정가가 대폭 인상된 이력이 있습니다."
+            elif score >= 50:
+                grade, reason = "약간의심", "정가 변동폭이 크고 잦은 할인이 발생합니다."
+            elif score >= 30:
+                grade, reason = "주의", "가격 변동 패턴이 일정하지 않습니다."
+            else:
+                grade, reason = "정상", "일반적인 가격 인하 패턴입니다."
+
+            data.append({
+                "gameId": int(row.game_id),
+                "name": str(row.game_name),
+                "score": score,
+                "grade": grade,
+                "reason": reason
+            })
+
+        # 점수 순 정렬
+        return sorted(data, key=lambda x: x["score"], reverse=True)
+    except Exception as e:
+        print(f"❌ [API 에러] /insight/fake-discount: {e}")
+        raise HTTPException(status_code=500, detail="가짜 할인 분석 오류")
+
+
+# ==========================================
+# 🌎 ④ 국가별 가격 비교
+# ==========================================
+@app.get("/insight/country-price/{game_id}")
+async def get_country_price(game_id: int, db: AsyncSession = Depends(get_rdb)):
+    try:
+        query_string = (
+            "SELECT g.game_name, p.currency, p.price "
+            "FROM games g "
+            "JOIN game_prices p ON g.game_id = p.game_id "
+            "WHERE g.game_id = :gid"
+        )
+        result = await db.execute(text(query_string), {"gid": game_id})
+        rows = result.fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="가격 정보가 없습니다.")
+
+        prices = {}
+        for r in rows:
+            prices[r.currency] = float(r.price)
+
+        return {
+            "gameId": game_id,
+            "name": rows[0].game_name,
+            "prices": prices
+        }
+    except Exception as e:
+        print(f"❌ [API 에러] /insight/country-price: {e}")
+        raise HTTPException(status_code=500, detail="가격 비교 오류")
+
+
+# ==========================================
+# 💬 ⑤ 리뷰 감성분석 (MongoDB 연동)
+# ==========================================
+@app.get("/insight/review-sentiment/{game_id}")
+async def get_review_sentiment(game_id: int):
+    try:
+        mongo_db = get_mongodb()
+        doc = await mongo_db.game_reviews.find_one({"game_id": game_id})
+
+        if not doc or not doc.get("reviews"):
+            raise HTTPException(status_code=404, detail="리뷰 데이터가 없습니다.")
+
+        reviews = doc["reviews"]
+        total = len(reviews)
+        pos_count = sum(1 for r in reviews if r.get("is_positive"))
+        neg_count = total - pos_count
+
+        # 파이썬 내장 라이브러리로 초간단 키워드 추출 (임시 형태소 분석)
+        words = []
+        for r in reviews:
+            content = str(r.get("content", ""))
+            # 한글, 영문만 추출
+            clean_text = re.sub(r'[^가-힣a-zA-Z\s]', '', content)
+            # 2글자 이상 단어만
+            words.extend([w for w in clean_text.split() if len(w) >= 2])
+
+        word_counts = Counter(words).most_common(8)
+
+        keywords = []
+        for word, count in word_counts:
+            # 빈도에 따라 weight (1~5) 부여, 긍/부정은 임의 배치(실제 모델 연동 전)
+            weight = min(5, max(1, count // 2))
+            # '재밌', '갓', '좋' 등의 글자가 있으면 긍정으로 판단
+            is_pos = True if any(c in word for c in ['재밌', '갓', '좋', '최고', '추천', 'fun', 'good']) else False
+
+            keywords.append({
+                "text": word,
+                "weight": weight,
+                "isPos": is_pos
+            })
+
+        return {
+            "positive": int((pos_count / total) * 100) if total > 0 else 0,
+            "negative": int((neg_count / total) * 100) if total > 0 else 0,
+            "totalReviews": total,
+            "keywords": keywords
+        }
+    except Exception as e:
+        print(f"❌ [API 에러] /insight/review-sentiment: {e}")
+        raise HTTPException(status_code=500, detail="리뷰 감성분석 오류")
