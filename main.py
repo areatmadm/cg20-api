@@ -9,8 +9,9 @@ from datetime import datetime
 
 from scrapers import fetch_hana_bank_rates, fetch_all_steam_rankings
 from services.itad_api import sync_itad_price_history
-from services.steam_api import fetch_full_steam_data, insert_full_game_data
-from database import AsyncSessionLocal
+from services.steam_api import fetch_full_steam_data, insert_full_game_data, fetch_steam_news_only, \
+    fetch_steam_reviews_only, save_game_reviews_to_mongo, save_game_news_to_mongo
+from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection, get_mongodb
 
 from sqlalchemy import text
 
@@ -85,6 +86,7 @@ async def process_steam_rankings():
 # ---------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await connect_to_mongo()
     # 💡 [핵심] 서버가 딱 켜지자마자 환율을 한 번 긁어옵니다. (안 그러면 첫 5분 동안은 0원이 뜹니다)
     await process_hana_bank()
     await process_steam_rankings()
@@ -374,3 +376,39 @@ async def get_game_price_detail(appid: int, currency: str):
             },
             "history": history
         }
+
+
+@app.get("/steam-game/{game_id}/news")
+async def get_game_news(game_id: int):
+    mongo_db = get_mongodb()
+    # 1. MongoDB에서 캐시 확인
+    existing_news = await mongo_db.game_news.find_one({"game_id": game_id})
+    if existing_news:
+        return {"status": "success", "source": "cache", "data": existing_news['news']}
+
+    # 2. 스팀 API 수집
+    print(f"  📡 [News Sync] AppID {game_id} 수집 시작")
+    news_items = await fetch_steam_news_only(game_id, count=3)
+
+    # 3. 💡 분리해둔 함수로 깔끔하게 저장!
+    await save_game_news_to_mongo(game_id, news_items)
+
+    return {"status": "success", "source": "api", "data": news_items}
+
+
+@app.get("/steam-game/{game_id}/reviews")
+async def get_game_reviews(game_id: int):
+    mongo_db = get_mongodb()
+    # 1. MongoDB에서 캐시 확인
+    existing_reviews = await mongo_db.game_reviews.find_one({"game_id": game_id})
+    if existing_reviews:
+        return {"status": "success", "source": "cache", "data": existing_reviews['reviews']}
+
+    # 2. 스팀 API 수집
+    print(f"  📡 [Review Sync] AppID {game_id} 수집 시작")
+    reviews = await fetch_steam_reviews_only(game_id, count=10)
+
+    # 3. 💡 분리해둔 함수로 깔끔하게 저장!
+    await save_game_reviews_to_mongo(game_id, reviews)
+
+    return {"status": "success", "source": "api", "data": reviews}

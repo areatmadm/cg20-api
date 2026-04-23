@@ -1,11 +1,53 @@
 import asyncio
+
+import httpx
 import requests
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from database import get_mongodb
 from services.itad_api import sync_itad_price_history
 from datetime import datetime
 
+
+# ==========================================
+# 📡 1. 스팀 뉴스 & 리뷰 추가 수집기
+# ==========================================
+async def fetch_steam_news_and_reviews(appid: int) -> dict:
+    """스팀 뉴스(3건)와 최신 리뷰를 가져옵니다."""
+    news_url = f"https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid={appid}&count=3"
+    reviews_url = f"https://store.steampowered.com/appreviews/{appid}?json=1&language=ko"
+
+    results = {"news": [], "reviews": []}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # 1. 뉴스 가져오기
+            news_res = await client.get(news_url, timeout=5.0)
+            if news_res.status_code == 200:
+                items = news_res.json().get('appnews', {}).get('newsitems', [])
+                for item in items:
+                    results['news'].append({
+                        "title": item.get('title'),
+                        "url": item.get('url'),
+                        "date": item.get('date')  # Unix Timestamp
+                    })
+
+            # 2. 리뷰 가져오기
+            rev_res = await client.get(reviews_url, timeout=5.0)
+            if rev_res.status_code == 200:
+                rev_list = rev_res.json().get('reviews', [])
+                for r in rev_list:
+                    results['reviews'].append({
+                        "is_positive": r.get('voted_up'),
+                        "playtime_hours": r.get('author', {}).get('playtime_forever', 0) / 60,
+                        "content": r.get('review'),
+                        "date": r.get('timestamp_created')  # Unix Timestamp
+                    })
+    except Exception as e:
+        print(f"  ⚠️ [Steam Sub-Data] {appid} 수집 중 일부 누락: {e}")
+
+    return results
 
 # ==========================================
 # 📡 1. 스팀 API - 가격 수집 (KRW, JPY, USD)
@@ -215,7 +257,107 @@ async def insert_full_game_data(db: AsyncSession, gi: dict):
                                       """), {'gid': appid, 'cc': cc, 'p': new_price})
 
             await db.commit()
+
+            # =========================================================
+            # 🎯 각종 외부 API 트리거 발동 (ITAD, 뉴스, 리뷰)
+            # =========================================================
+            if is_new_game:
+                # 1. ITAD 히스토리 수집
+                print(f"  🆕 [신규 게임 발견] AppID {appid}의 ITAD 히스토리를 수집합니다.")
+                await sync_itad_price_history(db, appid)
+
+                # 💡 2. [추가] 신규 게임은 뉴스/리뷰도 강제로 한 번 긁어서 몽고DB에 넣어줍니다!
+                print(f"  🆕 [신규 게임 발견] AppID {appid}의 뉴스/리뷰 초기 데이터를 몽고DB에 적재합니다.")
+
+                # 같은 파일에 있는 개별 수집기 함수들을 여기서 호출합니다.
+                initial_news = await fetch_steam_news_only(appid, count=3)
+                await save_game_news_to_mongo(appid, initial_news)
+
+                initial_reviews = await fetch_steam_reviews_only(appid, count=10)
+                await save_game_reviews_to_mongo(appid, initial_reviews)
+
+            elif price_changed:
+                # 가격 변동 시에는 ITAD만 수집 (뉴스/리뷰는 안 건드림)
+                print(f"  💰 [가격 변동 감지] AppID {appid}의 ITAD 히스토리를 갱신합니다.")
+                await sync_itad_price_history(db, appid)
+
         print(f"🌟 [DB 적재완료] AppID {appid} ('{gi['games']['game_name']}')")
     except Exception as e:
         await db.rollback()
         print(f"❌ [DB 적재실패] AppID {appid}: {e}")
+
+
+# ==========================================
+# 💾 4. MongoDB 개별 적재기 (뉴스 & 리뷰)
+# ==========================================
+async def save_game_news_to_mongo(game_id: int, news_items: list):
+    """수집된 뉴스를 MongoDB에 Upsert 합니다."""
+    if not news_items: return
+
+    mongo_db = get_mongodb()
+
+    try:
+        await mongo_db.game_news.update_one(
+            {"game_id": game_id},
+            {"$set": {
+                "game_id": game_id,
+                "news": news_items,
+                "updated_at": datetime.now()
+            }},
+            upsert=True
+        )
+        print(f"  🌟 [MongoDB] AppID {game_id} 뉴스 적재 완료")
+    except Exception as e:
+        print(f"  ❌ [MongoDB] AppID {game_id} 뉴스 적재 실패: {e}")
+
+
+async def save_game_reviews_to_mongo(game_id: int, reviews: list):
+    """수집된 리뷰를 MongoDB에 Upsert 합니다."""
+    if not reviews: return
+
+    mongo_db = get_mongodb()
+
+    try:
+        await mongo_db.game_reviews.update_one(
+            {"game_id": game_id},
+            {"$set": {
+                "game_id": game_id,
+                "reviews": reviews,
+                "updated_at": datetime.now()
+            }},
+            upsert=True
+        )
+        print(f"  🌟 [MongoDB] AppID {game_id} 리뷰 적재 완료")
+    except Exception as e:
+        print(f"  ❌ [MongoDB] AppID {game_id} 리뷰 적재 실패: {e}")
+
+# ==========================================
+# 📡 4. 뉴스 & 리뷰 개별 수집기 (온디맨드용)
+# ==========================================
+async def fetch_steam_news_only(appid: int, count: int = 3) -> list:
+    url = f"https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid={appid}&count={count}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5.0)
+            if res.status_code == 200:
+                return res.json().get('appnews', {}).get('newsitems', [])
+    except: pass
+    return []
+
+async def fetch_steam_reviews_only(appid: int, count: int = 10) -> list:
+    # 💡 쿼리 파라미터에 num_per_page=10 등을 넣어 개수를 조절합니다.
+    url = f"https://store.steampowered.com/appreviews/{appid}?json=1&language=all&num_per_page={count}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5.0)
+            if res.status_code == 200:
+                rev_list = res.json().get('reviews', [])
+                # 필요한 필드만 정제해서 반환
+                return [{
+                    "is_positive": r.get('voted_up'),
+                    "playtime_hours": r.get('author', {}).get('playtime_forever', 0) / 60,
+                    "content": r.get('review'),
+                    "date": r.get('timestamp_created')
+                } for r in rev_list]
+    except: pass
+    return []

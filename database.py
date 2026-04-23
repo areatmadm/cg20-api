@@ -32,21 +32,50 @@ async def get_rdb():
         yield session
 
 # ==========================================
-# 2. MongoDB 설정 (몽고DB도 똑같이 적용 가능!)
+# 2. MongoDB 설정 (직접 주입 방식으로 변경!)
 # ==========================================
 MONGO_USER = os.getenv("MONGO_USER", "mongo_admin")
-MONGO_PASS = os.getenv("MONGO_PASSWORD", "m0ng0@pw!")
+MONGO_PASS = os.getenv("MONGO_PASS", "m0ng0@pw!")
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
 MONGO_PORT = os.getenv("MONGO_PORT", "27017")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "streamrank_mongo")
 
-encoded_mongo_pass = quote_plus(MONGO_PASS)
+# URL 조립 (가장 스탠다드한 방식 복구)
+from urllib.parse import quote_plus
 
-# 몽고DB URL 조립
-MONGO_URL = f"mongodb://{MONGO_USER}:{encoded_mongo_pass}@{MONGO_HOST}:{MONGO_PORT}/admin"
+encoded_pass = quote_plus(MONGO_PASS)
+# 💡 authSource=admin 명시
+MONGO_URL = f"mongodb://{MONGO_USER}:{encoded_pass}@{MONGO_HOST}:{MONGO_PORT}/?authSource=admin"
 
-mongo_client = AsyncIOMotorClient(MONGO_URL)
-mongo_db = mongo_client[MONGO_DB_NAME]
 
+class MongoDB:
+    client: AsyncIOMotorClient = None
+    db = None
+
+
+db_obj = MongoDB()
+
+
+async def connect_to_mongo():
+    """FastAPI 구동 시 호출할 연결 함수"""
+    print("⏳ MongoDB 비동기 연결 시도 중...")
+    db_obj.client = AsyncIOMotorClient(MONGO_URL)
+    db_obj.db = db_obj.client[MONGO_DB_NAME]
+
+    # 💡 핑을 때려서 실제로 연결됐는지 확실히 검증합니다.
+    try:
+        await db_obj.client.admin.command('ping')
+        print("✅ MongoDB 연결 성공!")
+    except Exception as e:
+        print(f"❌ MongoDB 연결 실패: {e}")
+
+
+async def close_mongo_connection():
+    if db_obj.client:
+        db_obj.client.close()
+        print("🛑 MongoDB 연결 종료")
+
+
+# 다른 파일에서 가져다 쓸 수 있도록 래퍼 함수 생성
 def get_mongodb():
-    return mongo_db
+    return db_obj.db
