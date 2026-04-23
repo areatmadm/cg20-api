@@ -66,7 +66,11 @@ async def update_chzzk_rank():
 
         PLATFORM_RANKINGS["chzzk"] = new_ch_rank
         LIVE_STREAMS["chzzk"] = new_ch_sum
-        PLATFORM_RANKINGS["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 💡 [핵심 추가] 두 캐시 모두 시간 도장을 쾅 찍어줍니다!
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        PLATFORM_RANKINGS["last_updated"] = current_time
+        LIVE_STREAMS["last_updated"] = current_time
+
         print(f"✅ [Chzzk] 정제 완료: {len(new_ch_rank)}개 게임 등재")
 
     except Exception as e:
@@ -99,6 +103,9 @@ async def update_twitch_rank():
 
             PLATFORM_RANKINGS["twitch"] = new_tw_rank
             LIVE_STREAMS["twitch"] = new_tw_sum
-            print(f"✅ [Twitch] {len(new_tw_rank)}개 스팀 게임 정제 완료")
+            # 💡 [핵심 추가] 여기도 두 캐시 모두 시간 도장을 쾅 찍어줍니다!
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            PLATFORM_RANKINGS["last_updated"] = current_time
+            LIVE_STREAMS["last_updated"] = current_time
     except Exception as e:
         print(f"❌ [Twitch] 에러: {e}")
