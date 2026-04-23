@@ -816,3 +816,90 @@ async def get_review_sentiment(game_id: int):
     except Exception as e:
         print(f"❌ [API 에러] /insight/review-sentiment: {e}")
         raise HTTPException(status_code=500, detail="리뷰 감성분석 오류")
+
+
+# ==========================================
+# 🔍 통합 검색 API (키워드 + 장르 필터)
+# ==========================================
+@app.get("/search")
+async def search_games(
+        q: str = "",
+        genre: str = "전체",
+        limit: int = 30,
+        db: AsyncSession = Depends(get_rdb)
+):
+    try:
+        # 기본 쿼리: 게임 정보 + 가격(KRW) + 장르 합치기(GROUP_CONCAT)
+        # 💡 에디터 자동 공백 방어용 문자열 쪼개기 적용!
+        base_query = (
+                "SELECT g.game_id, g.game_name, g.header_image_url, g.game_is_free, "
+                "gp.price, "
+                "GROUP_CONCAT" + "(gen.genre_name SEPARATOR ', ') as genre_list "
+                                 "FROM games g "
+                                 "LEFT JOIN game_prices gp ON g.game_id = gp.game_id AND gp.currency = 'KRW' "
+                                 "LEFT JOIN game_genres gg ON g.game_id = gg.game_id "
+                                 "LEFT JOIN genres gen ON gg.genre_id = gen.genre_id "
+        )
+
+        where_clauses = []
+        params = {"limit": limit}
+
+        # 1. 키워드 검색 (제목 또는 장르명에 포함된 경우)
+        if q:
+            where_clauses.append("(g.game_name LIKE :q OR gen.genre_name LIKE :q)")
+            params["q"] = f"%{q}%"
+
+        # 2. 장르 필터링
+        if genre != "전체":
+            where_clauses.append("g.game_id IN " + "(" +
+                                 "SELECT game_id FROM game_genres WHERE genre_id = " + "(" +
+                                 "SELECT genre_id FROM genres WHERE genre_name = :genre" + ")" + ")")
+            params["genre"] = genre
+
+        # WHERE 절 조립
+        query_full = base_query
+        if where_clauses:
+            query_full += " WHERE " + " AND ".join(where_clauses)
+
+        # GROUP BY 및 정렬
+        query_full += " GROUP BY g.game_id ORDER BY g.game_id DESC LIMIT :limit"
+
+        result = await db.execute(text(query_full), params)
+
+        data = []
+        for row in result.fetchall():
+            data.append({
+                "gameId": row.game_id,
+                "name": row.game_name,
+                "headerImage": row.header_image_url,
+                "isFree": bool(row.game_is_free),
+                "price": float(row.price) if row.price else 0,
+                "genres": row.genre_list.split(", ") if row.genre_list else []
+            })
+
+        return {
+            "status": "success",
+            "count": len(data),
+            "data": data
+        }
+
+    except Exception as e:
+        print(f"❌ [API 에러] /search: {e}")
+        raise HTTPException(status_code=500, detail="검색 처리 중 오류가 발생했습니다.")
+
+
+# ==========================================
+# 🔍 검색용 장르 목록 (Select Box용)
+# ==========================================
+@app.get("/search/genres")
+async def get_search_categories(db: AsyncSession = Depends(get_rdb)):
+    try:
+        # 중복 없는 장르 목록을 가져옵니다.
+        query_string = "SELECT DISTINCT genre_name FROM genres ORDER BY genre_name ASC"
+        result = await db.execute(text(query_string))
+
+        # '전체'를 포함하여 반환
+        return ["전체"] + [row[0] for row in result.fetchall()]
+    except Exception as e:
+        print(f"❌ [API 에러] /search/genres: {e}")
+        return ["전체"]
