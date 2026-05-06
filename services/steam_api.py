@@ -8,6 +8,7 @@ from sqlalchemy import text
 from database import get_mongodb
 from services.itad_api import sync_itad_price_history
 from datetime import datetime
+from database import es
 
 
 # ==========================================
@@ -280,7 +281,25 @@ async def insert_full_game_data(db: AsyncSession, gi: dict):
                 # 가격 변동 시에는 ITAD만 수집 (뉴스/리뷰는 안 건드림)
                 print(f"  💰 [가격 변동 감지] AppID {appid}의 ITAD 히스토리를 갱신합니다.")
                 await sync_itad_price_history(db, appid)
-
+      # ES 인덱싱 (여기에 추가)
+        try:
+            await es.index(
+                index="games",
+                id=appid,
+                document={
+                    "game_id":    appid,
+                    "game_name":  gi['games']['game_name'],
+                    "genres":     [g['name'] for g in gi['genres']],
+                    "developers": gi['developers'],
+                    "publishers": gi['publishers'],
+                    "is_free":    bool(gi['games']['game_is_free']),
+                    "price_krw":  gi['prices'].get('KRW', 0),
+                    "header_image_url": gi['games']['header_image_url']
+                }
+            )
+            print(f"  🔍 [ES 인덱싱] AppID {appid} 완료")
+        except Exception as e:
+            print(f"  ⚠️ [ES 인덱싱 실패] AppID {appid}: {e}")
         print(f"🌟 [DB 적재완료] AppID {appid} ('{gi['games']['game_name']}')")
     except Exception as e:
         await db.rollback()

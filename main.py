@@ -17,8 +17,7 @@ from scrapers import fetch_hana_bank_rates, fetch_all_steam_rankings
 from services.itad_api import sync_itad_price_history
 from services.steam_api import fetch_full_steam_data, insert_full_game_data, fetch_steam_news_only, \
     fetch_steam_reviews_only, save_game_reviews_to_mongo, save_game_news_to_mongo
-from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection, get_mongodb, get_rdb
-
+from database import AsyncSessionLocal, connect_to_mongo, close_mongo_connection, get_mongodb, get_rdb, connect_to_rdb, connect_to_es, close_es, es
 from sqlalchemy import text
 
 from services.stream_tasks import update_chzzk_rank, update_twitch_rank
@@ -93,6 +92,8 @@ async def process_steam_rankings():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
+    await connect_to_rdb()
+    await connect_to_es()
 
     # 1. 환율 및 스팀 랭킹 초기 수집
     await process_hana_bank()
@@ -117,6 +118,8 @@ async def lifespan(app: FastAPI):
 
     yield
     scheduler.shutdown()
+    await close_mongo_connection()
+    await close_es()  # add this
     await close_mongo_connection()
 
 
@@ -942,6 +945,7 @@ async def get_review_sentiment(game_id: int):
 # ==========================================
 # 🔍 통합 검색 API (키워드 + 장르 필터)
 # ==========================================
+'''
 @app.get("/search")
 async def search_games(
         q: str = "",
@@ -1007,7 +1011,34 @@ async def search_games(
     except Exception as e:
         print(f"❌ [API 에러] /search: {e}")
         raise HTTPException(status_code=500, detail="검색 처리 중 오류가 발생했습니다.")
+'''
+@app.get("/search")
+async def search_games(q: str = "", genre: str = "전체", limit: int = 30):
+    try:
+        must = []
+        if q:
+            must.append({
+                "multi_match": {
+                    "query": q,
+                    "fields": ["game_name^3", "developers^2", "publishers^2"],
+                    "fuzziness": "AUTO"
+                }
+            })
+        if genre != "전체":
+            must.append({"term": {"genres": genre}})
 
+        body = {
+            "query": {"bool": {"must": must}} if must else {"match_all": {}},
+            "size": limit
+        }
+
+        result = await es.search(index="games", body=body)
+        data = [hit["_source"] for hit in result["hits"]["hits"]]
+        return {"status": "success", "count": len(data), "data": data}
+
+    except Exception as e:
+        print(f"❌ [ES 검색 에러] {e}")
+        raise HTTPException(status_code=500, detail="검색 오류")
 
 # ==========================================
 # 🔍 검색용 장르 목록 (Select Box용)

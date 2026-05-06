@@ -1,10 +1,12 @@
 import os
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from motor.motor_asyncio import AsyncIOMotorClient
+from elasticsearch import AsyncElasticsearch
 
 load_dotenv()
 
@@ -12,10 +14,10 @@ load_dotenv()
 # 1. MariaDB 설정 (특수기호 완벽 대응)
 # ==========================================
 DB_USER = os.getenv("MARIADB_USER", "root")
-DB_PASS = os.getenv("MARIADB_PASSWORD", "myP@ssw0rd!#?") # 특수기호 들어간 비번 치기...
-DB_HOST = os.getenv("MARIADB_HOST", "127.0.0.1")
+DB_PASS = os.getenv("MARIADB_PASSWORD", "pass123#") # 특수기호 들어간 비번 치기...
+DB_HOST = os.getenv("MARIADB_HOST", "192.168.0.114")
 DB_PORT = os.getenv("MARIADB_PORT", "3306")
-DB_NAME = os.getenv("MARIADB_DATABASE", "streamrank")
+DB_NAME = os.getenv("MARIADB_DATABASE", "gamedb")
 
 # 💡 [핵심] 비밀번호만 안전한 문자열로 변환 (예: @ -> %40)
 encoded_db_pass = quote_plus(DB_PASS)
@@ -26,11 +28,61 @@ MARIADB_URL = f"mysql+aiomysql://{DB_USER}:{encoded_db_pass}@{DB_HOST}:{DB_PORT}
 engine = create_async_engine(MARIADB_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
+'''
+async def get_rdb():
+    try:
+    async with AsyncSessionLocal() as session:
+        yield session
+        await session.execute(text("SELECT 1"))
+    print ("✅ MariaDB 연결 성공!")
+    except Exception as e:
+        print(f"❌ MariaDB 연결 실패: {e}")
+'''
 
 async def get_rdb():
     async with AsyncSessionLocal() as session:
         yield session
 
+async def connect_to_rdb():
+    """FastAPI 구동 시 MariaDB 연결 확인"""
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        print("✅ MariaDB 연결 성공!")
+    except Exception as e:
+        print(f"❌ MariaDB 연결 실패: {e}")        
+
+    
+ES_HOST = os.getenv("ES_HOST", "localhost")
+ES_PORT = os.getenv("ES_PORT", "9200")
+
+es = AsyncElasticsearch(f"http://{ES_HOST}:{ES_PORT}")
+
+async def connect_to_es():
+    try:
+        exists = await es.indices.exists(index="games")
+        if not exists:
+            await es.indices.create(index="games", body={
+                "mappings": {
+                    "properties": {
+                        "game_id":    {"type": "integer"},
+                        "game_name":  {"type": "text", "analyzer": "standard"},
+                        "genres":     {"type": "keyword"},
+                        "developers": {"type": "text", "analyzer": "standard"},
+                        "publishers": {"type": "text", "analyzer": "standard"},
+                        "is_free":    {"type": "boolean"},
+                        "price_krw":  {"type": "float"},
+                        "header_image_url": {"type": "keyword"}
+                    }
+                }
+            })
+            print("✅ ES 인덱스 생성 완료")
+        print("✅ Elasticsearch 연결 성공!")
+    except Exception as e:
+        print(f"❌ Elasticsearch 연결 실패: {e}")
+
+async def close_es():
+    await es.close()
 # ==========================================
 # 2. MongoDB 설정 (직접 주입 방식으로 변경!)
 # ==========================================
