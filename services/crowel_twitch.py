@@ -1,3 +1,5 @@
+import os
+
 import requests
 import time
 import pandas as pd
@@ -147,8 +149,8 @@ def get_final_match(game_name, steam_norm_dict, local_steam_names, steam_raw_dic
 # ==========================================
 if __name__ == "__main__":
     STEAM_DB_FILE = "master_rdb.csv"
-    TWITCH_CLIENT_ID = "cfvwl8jixo7cf2kvvebd90cg7iwkfk"
-    TWITCH_CLIENT_SECRET = "rs4lwqj9nrp0j6fi0cxymrigw5llwa"
+    TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
+    TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
 
     print("=" * 70)
     print("🎬 트위치 - 스팀 랭킹 매칭 엔진 가동")
