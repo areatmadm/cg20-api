@@ -7,4 +7,4 @@ RUN pip install uvicorn app asyncio fastapi apscheduler sqlalchemy playwright lx
 
 COPY . .
 
-CMD ["uvicorn", "app:main"]
+CMD ["uvicorn", "main:app"]
