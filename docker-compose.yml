@@ -28,39 +28,66 @@ services:
       - cg20-api_2
       - cg20-api_3
 
+  # ── 백엔드 3개 (API 전용) ──────────────────────────────
   cg20-api_1:
-    image: heon0me/cg20-api:1.0
+    image: heon0me/cg20-api:1.1
     networks:
       - cg20-front-back
     ports:
       - 8010:8000
+    environment:
+      - CRAWLER_URL=http://cg20-crawler:8099
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
       - ./backend/.env:/cg20-api/.env
+    depends_on:
+      - cg20-crawler
 
   cg20-api_2:
-    image: heon0me/cg20-api:1.0
+    image: heon0me/cg20-api:1.1
     networks:
       - cg20-front-back
     ports:
       - 8011:8000
+    environment:
+      - CRAWLER_URL=http://cg20-crawler:8099
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
       - ./backend/.env:/cg20-api/.env
+    depends_on:
+      - cg20-crawler
 
   cg20-api_3:
-    image: heon0me/cg20-api:1.0
+    image: heon0me/cg20-api:1.1
     networks:
       - cg20-front-back
     ports:
       - 8012:8000
+    environment:
+      - CRAWLER_URL=http://cg20-crawler:8099
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./backend/.env:/cg20-api/.env
+    depends_on:
+      - cg20-crawler
+
+  # ── 크롤러 1개 (수집 + 캐시 전용) ────────────────────────
+  cg20-crawler:
+    image: heon0me/cg20-api:1.1
+    command: ["--crawl"]          # 크롤러 모드
+    networks:
+      - cg20-front-back
+    ports:
+      - 8099:8099                 # 내부 캐시 API (외부 노출 안 해도 됨)
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
       - ./backend/.env:/cg20-api/.env
 
+  # ── 프론트엔드 3개 ────────────────────────────────────────
   cg20_1:
     image: heon0me/cg20:1.4
     networks:
@@ -70,7 +97,6 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./frontend/.env:/cg20/.env
 
   cg20_2:
     image: heon0me/cg20:1.4
@@ -81,7 +107,6 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./frontend/.env:/cg20/.env
 
   cg20_3:
     image: heon0me/cg20:1.4
@@ -92,7 +117,6 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./frontend/.env:/cg20/.env
 
 networks:
   cg20-front-back:
