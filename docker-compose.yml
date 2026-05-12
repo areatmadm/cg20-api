@@ -7,7 +7,7 @@ services:
       - 80:80
       - 443:443
     volumes:
-      - $(pwd)/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:
       - cg20-haproxy
       - cg20_1
@@ -22,7 +22,7 @@ services:
       - 8080:8080
       - 9001:9000
     volumes:
-      - $(pwd)/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - cg20-api_1
       - cg20-api_2
@@ -37,7 +37,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20-api/.env
+      - ./backend/.env:/cg20-api/.env
 
   cg20-api_2:
     image: heon0me/cg20-api:1.0
@@ -48,7 +48,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20-api/.env
+      - ./backend/.env:/cg20-api/.env
 
   cg20-api_3:
     image: heon0me/cg20-api:1.0
@@ -59,7 +59,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20-api/.env
+      - ./backend/.env:/cg20-api/.env
 
   cg20_1:
     image: heon0me/cg20:1.0
@@ -70,7 +70,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20/.env
+      - ./frontend/.env:/cg20/.env
 
   cg20_2:
     image: heon0me/cg20:1.0
@@ -81,7 +81,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20/.env
+      - ./frontend/.env:/cg20/.env
 
   cg20_3:
     image: heon0me/cg20:1.0
@@ -92,7 +92,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./.env:/cg20/.env
+      - ./frontend/.env:/cg20/.env
 
 networks:
   cg20-front-back:
