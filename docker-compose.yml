@@ -30,7 +30,7 @@ services:
 
   # ── 백엔드 3개 (API 전용) ──────────────────────────────
   cg20-api_1:
-    image: heon0me/cg20-api:1.2
+    image: heon0me/cg20-api:1.3
     networks:
       - cg20-front-back
     ports:
@@ -45,7 +45,7 @@ services:
       - cg20-crawler
 
   cg20-api_2:
-    image: heon0me/cg20-api:1.2
+    image: heon0me/cg20-api:1.3
     networks:
       - cg20-front-back
     ports:
@@ -60,7 +60,7 @@ services:
       - cg20-crawler
 
   cg20-api_3:
-    image: heon0me/cg20-api:1.2
+    image: heon0me/cg20-api:1.3
     networks:
       - cg20-front-back
     ports:
@@ -76,7 +76,7 @@ services:
 
   # ── 크롤러 1개 (수집 + 캐시 전용) ────────────────────────
   cg20-crawler:
-    image: heon0me/cg20-api:1.2
+    image: heon0me/cg20-api:1.3
     command: ["--crawl"]          # 크롤러 모드
     networks:
       - cg20-front-back
