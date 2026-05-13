@@ -2,7 +2,8 @@ import requests
 import time
 import pandas as pd
 import re
-from duckduckgo_search import DDGS
+from ddgs import DDGS
+
 from thefuzz import process, fuzz
 from deep_translator import GoogleTranslator
 

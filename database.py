@@ -10,13 +10,16 @@ from elasticsearch import AsyncElasticsearch
 
 load_dotenv()
 
+
+
+
 # ==========================================
 # 1. MariaDB 설정 (특수기호 완벽 대응)
 # ==========================================
 DB_USER = os.getenv("MARIADB_USER", "root")
 DB_PASS = os.getenv("MARIADB_PASSWORD", "pass123#") # 특수기호 들어간 비번 치기...
 DB_HOST = os.getenv("MARIADB_HOST", "192.168.0.114")
-DB_PORT = os.getenv("MARIADB_PORT", "3306")
+DB_PORT = os.getenv("MARIADB_PORT", "3307")
 DB_NAME = os.getenv("MARIADB_DATABASE", "gamedb")
 
 # 💡 [핵심] 비밀번호만 안전한 문자열로 변환 (예: @ -> %40)
@@ -53,7 +56,7 @@ async def connect_to_rdb():
         print(f"❌ MariaDB 연결 실패: {e}")        
 
     
-ES_HOST = os.getenv("ES_HOST", "localhost")
+ES_HOST = os.getenv("ES_HOST", "192.168.0.114")
 ES_PORT = os.getenv("ES_PORT", "9200")
 
 es = AsyncElasticsearch(f"http://{ES_HOST}:{ES_PORT}")
@@ -86,11 +89,23 @@ async def close_es():
 # ==========================================
 # 2. MongoDB 설정 (직접 주입 방식으로 변경!)
 # ==========================================
+'''
 MONGO_USER = os.getenv("MONGO_USER", "mongo_admin")
 MONGO_PASS = os.getenv("MONGO_PASS", "m0ng0@pw!")
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
 MONGO_PORT = os.getenv("MONGO_PORT", "27017")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "streamrank_mongo")
+'''
+MONGO_USER = os.getenv("MONGO_USER", "gameuser")
+MONGO_PASS = os.getenv("MONGO_PASS", "m0ng0pw123")
+MONGO_HOST = os.getenv("MONGO_HOST", "192.168.0.114")
+MONGO_PORT = os.getenv("MONGO_PORT", "27018")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "gameDB")
+
+
+
+
+
 
 # URL 조립 (가장 스탠다드한 방식 복구)
 from urllib.parse import quote_plus
