@@ -1,54 +1,52 @@
-import httpx
-from lxml import html
-import re
-
-async def fetch_steam_chart_httpx(country_code: str) -> list:
-    url = f"https://store.steampowered.com/charts/topselling/{country_code}?l=koreana"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            res = await client.get(url, headers=headers, timeout=15.0)
-            res.raise_for_status()
-            html_content = res.text
-
-        tree = html.fromstring(html_content)
-        links = tree.xpath('//table//a[contains(@href, "/app/")]/@href')
-
-        appids = []
-        for link in links:
-            match = re.search(r'/app/(\d+)', link)
-            if match:
-                appids.append(int(match.group(1)))
-
-        unique_appids = list(dict.fromkeys(appids))
-        print(f"  [{country_code}] 추출된 AppID: {len(unique_appids)}개")
-
-        if unique_appids:
-            print(f"  [{country_code}] 샘플 5개: {unique_appids[:5]}")
-        else:
-            print(f"  [{country_code}] ❌ AppID 없음 → JS 렌더링 필요할 수 있음")
-            # 디버깅용: HTML 일부 출력
-            print(f"  [{country_code}] HTML 길이: {len(html_content)}")
-            print(f"  [{country_code}] HTML 앞부분: {html_content[:500]}")
-
-        return unique_appids[:100]
-
-    except Exception as e:
-        print(f"  [{country_code}] 에러: {e}")
-        return []
-
-
 import asyncio
+from database import AsyncSessionLocal, es
+from sqlalchemy import text
 
-async def main():
-    print("=== 스팀 차트 httpx 테스트 ===\n")
-    for country in ["KR", "JP", "US"]:
-        result = await fetch_steam_chart_httpx(country)
-        print(f"  [{country}] 최종 결과: {len(result)}개\n")
+async def bulk_index():
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(text("""
+            SELECT 
+                g.game_id,
+                g.game_name,
+                g.header_image_url,
+                g.game_is_free,
+                GROUP_CONCAT(DISTINCT ge.genre_name) AS genres,
+                GROUP_CONCAT(DISTINCT d.developer_name) AS developers,
+                GROUP_CONCAT(DISTINCT p.publisher_name) AS publishers
+            FROM games g
+            LEFT JOIN game_genres gg ON g.game_id = gg.game_id
+            LEFT JOIN genres ge ON gg.genre_id = ge.genre_id
+            LEFT JOIN game_developers gd ON g.game_id = gd.game_id
+            LEFT JOIN developers d ON gd.developer_id = d.developer_id
+            LEFT JOIN game_publishers gp ON g.game_id = gp.game_id
+            LEFT JOIN publishers p ON gp.publisher_id = p.publisher_id
+            GROUP BY 
+                g.game_id,
+                g.game_name,
+                g.header_image_url,
+                g.game_is_free
+        """))
 
-asyncio.run(main())
+        rows = result.fetchall()
+
+        for i, row in enumerate(rows):
+            await es.index(
+                index="games",
+                id=row.game_id,
+                document={
+                    "game_id": row.game_id,
+                    "game_name": row.game_name,
+                    "header_image_url": row.header_image_url,
+                    "is_free": bool(row.game_is_free),
+                    "genres": row.genres.split(",") if row.genres else [],
+                    "developers": row.developers.split(",") if row.developers else [],
+                    "publishers": row.publishers.split(",") if row.publishers else []
+                }
+            )
+
+            if i % 1000 == 0:
+                print(f"진행중... {i}/{len(rows)}")
+
+        print(f"✅ {len(rows)}개 게임 ES 인덱싱 완료!")
+
+asyncio.run(bulk_index())
