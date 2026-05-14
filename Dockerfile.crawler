@@ -1,4 +1,5 @@
 FROM heon0me/cg20-base:latest
+RUN playwright install chromium --with-deps
 COPY . .
 ENTRYPOINT ["python", "main.py"]
-CMD []
+CMD ["--crawl"]

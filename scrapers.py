@@ -146,11 +146,15 @@ async def fetch_all_steam_rankings() -> dict:
     """
     print(f"\n[{datetime.now()}] 🎮 --- 스팀 글로벌 랭킹 동기화 시작 ---")
 
-    # 1. 3개국 랭킹 비동기로 동시에 가져오기
+    # 1. 3개국 랭킹 순차적으로 가져오기
     kr_task = fetch_steam_top_sellers('KR')
     jp_task = fetch_steam_top_sellers('JP')
     us_task = fetch_steam_top_sellers('US')
-    kr_appids, jp_appids, us_appids = await asyncio.gather(kr_task, jp_task, us_task)
+
+    # 1-1. 가져온 값을 {COUNTRY}_appids에 넣기
+    kr_appids = await fetch_steam_top_sellers('KR')
+    jp_appids = await fetch_steam_top_sellers('JP')
+    us_appids = await fetch_steam_top_sellers('US')
 
     # 2. 모든 국가의 AppID를 합치고 중복 제거
     all_appids = set(kr_appids + jp_appids + us_appids)
