@@ -27,7 +27,7 @@ lxml
 pandas
 
 # Search / Matching
-ddgs
+duckduckgo-search
 thefuzz
 deep-translator
 
