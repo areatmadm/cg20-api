@@ -16,7 +16,7 @@ requests
 aiohttp
 
 # Elasticsearch
-elasticsearch
+elasticsearch==8.18.0
 
 # Scraping
 playwright
