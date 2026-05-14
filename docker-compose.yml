@@ -77,11 +77,11 @@ services:
   # ── 크롤러 1개 (수집 + 캐시 전용) ────────────────────────
   cg20-crawler:
     image: heon0me/cg20-crawler:1.4
-    command: ["--crawl"]          # 크롤러 모드
+    #command: ["--crawl"]          # 크롤러 모드
     networks:
       - cg20-front-back
-    ports:
-      - 8099:8099                 # 내부 캐시 API (외부 노출 안 해도 됨)
+    #ports:
+    #  - 8099:8099                 # 내부 캐시 API (외부 노출 안 해도 됨)
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
