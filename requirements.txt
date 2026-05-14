@@ -1,6 +1,7 @@
 # Web Framework
 fastapi
 uvicorn
+app
 
 # Scheduler
 apscheduler
@@ -26,7 +27,7 @@ lxml
 pandas
 
 # Search / Matching
-duckduckgo-search
+ddgs
 thefuzz
 deep-translator
 
